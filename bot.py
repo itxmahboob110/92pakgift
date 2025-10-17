@@ -1,220 +1,283 @@
-import asyncio
-import datetime
-import json
+# bot.py
 import os
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from dotenv import load_dotenv
+import time
+import json
+import logging
+from threading import Thread
+from flask import Flask, request
+import telebot
 
-# Load environment variables
-load_dotenv()
+# ------------- Config / Logging -------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME_RAW = os.getenv("CHANNEL_USERNAME")
-WHATSAPP_LINK = os.getenv("WHATSAPP_LINK")
-ADMIN_ID_STR = os.getenv("ADMIN_ID")
-DAILY_CODE = os.getenv("DAILY_CODE", "")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # required
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").replace("https://t.me/", "").lstrip("@")
+WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+DAILY_CODE = os.getenv("DAILY_CODE", "92PAK-GIFT")
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")  # Render provides this automatically
 
-if not BOT_TOKEN or not CHANNEL_USERNAME_RAW or not WHATSAPP_LINK or not ADMIN_ID_STR:
-    raise ValueError("Missing environment variables in .env")
+if not TOKEN:
+    logger.critical("TELEGRAM_BOT_TOKEN not set. Add it in Render environment variables.")
+    raise SystemExit("Missing TELEGRAM_BOT_TOKEN")
 
-ADMIN_ID = int(ADMIN_ID_STR)
-CHANNEL_USERNAME = CHANNEL_USERNAME_RAW.replace("https://t.me/", "").lstrip("@")
+if not CHANNEL_USERNAME:
+    logger.critical("CHANNEL_USERNAME not set.")
+    raise SystemExit("Missing CHANNEL_USERNAME")
 
-# JSON database file
+if not WHATSAPP_LINK:
+    logger.critical("WHATSAPP_LINK not set.")
+    raise SystemExit("Missing WHATSAPP_LINK")
+
+if ADMIN_ID == 0:
+    logger.critical("ADMIN_ID not set or invalid.")
+    raise SystemExit("Missing ADMIN_ID")
+
+# ------------- Data storage (simple JSON) -------------
 DB_FILE = "data.json"
 
 def load_data():
     if not os.path.exists(DB_FILE):
-        return {}
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+        return {"users": {}, "all_users": []}
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.exception("Failed to load DB file, starting fresh.")
+        return {"users": {}, "all_users": []}
 
-def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def save_data(d):
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+    except Exception:
+        logger.exception("Failed to save DB file.")
 
-data = load_data()
+db = load_data()
 
-bot = Bot(token=BOT_TOKEN)
-router = Router()
+# ensure structure
+db.setdefault("users", {})
+db.setdefault("all_users", [])
 
-# -------------------- Start Command --------------------
-@router.message(CommandStart())
-async def start_cmd(msg: Message):
-    uid = str(msg.from_user.id)
-    args = msg.text.split()
-    ref = None
-    if len(args) > 1:
-        ref = args[1]
+# ------------- Bot init and Flask -------------
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-    # Initialize user data if not present
-    if uid not in data:
-        data[uid] = {
+WEBHOOK_PATH = f"/{TOKEN}"
+if WEBHOOK_HOST:
+    WEBHOOK_URL_BASE = f"https://{WEBHOOK_HOST}"
+    WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
+else:
+    WEBHOOK_URL = None
+
+# ------------- Utility helpers -------------
+def ensure_user_record(uid: int):
+    s = str(uid)
+    if s not in db["users"]:
+        db["users"][s] = {
             "total_referrals": 0,
             "used_referrals": 0,
             "last_claim": None
         }
+        if s not in db["all_users"]:
+            db["all_users"].append(s)
+        save_data(db)
 
-    # Referral tracking
-    if ref and ref != uid:
-        if ref in data:
-            data[ref]["total_referrals"] += 1
-        else:
-            data[ref] = {
-                "total_referrals": 1,
-                "used_referrals": 0,
-                "last_claim": None
-            }
-        save_data(data)
+def get_available_referrals(uid: int):
+    rec = db["users"].get(str(uid), {"total_referrals": 0, "used_referrals": 0})
+    return rec["total_referrals"] - rec["used_referrals"]
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Join Telegram Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
-        [InlineKeyboardButton(text="💬 Join WhatsApp Channel", url=WHATSAPP_LINK)],
-        [InlineKeyboardButton(text="✅ Verify & Continue", callback_data="verify")]
-    ])
-
-    bot_info = await bot.get_me()
-    referral_link = f"https://t.me/{bot_info.username}?start={uid}"
-
-    await msg.answer(
-        f"👋 <b>Hey {msg.from_user.first_name}!</b>\n\n"
-        f"Welcome to your daily gift bot 🎁\n"
-        f"Join both channels and verify below to continue.\n\n"
-        f"Your Invite Link 👇\n<code>{referral_link}</code>",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-# -------------------- Verification --------------------
-@router.callback_query(F.data == "verify")
-async def verify_channels(callback: CallbackQuery):
-    user_id = callback.from_user.id
+def send_admin_message(text: str):
     try:
-        member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        if member.status not in ["member", "administrator", "creator"]:
-            await callback.answer("❌ Join the Telegram channel first!", show_alert=True)
+        bot.send_message(ADMIN_ID, text)
+    except Exception:
+        logger.exception("Failed to send admin message.")
+
+# ------------- Telegram handlers (logic) -------------
+@bot.message_handler(commands=["start"])
+def handle_start(message):
+    uid = message.from_user.id
+    text_parts = message.text.split()
+    ref = None
+    if len(text_parts) > 1:
+        ref = text_parts[1]
+
+    ensure_user_record(uid)
+
+    # track referral (if exists and not self-ref)
+    if ref and ref != str(uid):
+        if ref not in db["users"]:
+            db["users"][ref] = {"total_referrals": 1, "used_referrals": 0, "last_claim": None}
+            if ref not in db["all_users"]:
+                db["all_users"].append(ref)
+        else:
+            db["users"][ref]["total_referrals"] += 1
+        save_data(db)
+        logger.info(f"Referral: user {uid} referred by {ref}")
+
+    # reply with invite + buttons
+    invite_link = f"https://t.me/{bot.get_me().username}?start={uid}"
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    keyboard.add(telebot.types.InlineKeyboardButton("📢 Join Telegram Channel", url=f"https://t.me/{CHANNEL_USERNAME}"))
+    keyboard.add(telebot.types.InlineKeyboardButton("💬 Join WhatsApp Channel", url=WHATSAPP_LINK))
+    keyboard.add(telebot.types.InlineKeyboardButton("✅ Verify & Continue", callback_data="verify"))
+
+    bot.send_message(uid,
+                     f"👋 Hey {message.from_user.first_name}!\n\n"
+                     f"Join both channels then click Verify to continue.\n\n"
+                     f"Your invite link:\n`{invite_link}`",
+                     reply_markup=keyboard,
+                     parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda c: c.data == "verify")
+def handle_verify(call):
+    user_id = call.from_user.id
+    try:
+        member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
+        status = member.status
+        if status not in ["member", "administrator", "creator"]:
+            bot.answer_callback_query(call.id, "❌ You haven't joined the Telegram channel yet!", show_alert=True)
             return
     except Exception as e:
-        await callback.answer(f"⚠️ Verification failed: {e}", show_alert=True)
+        logger.exception("Channel verification failed")
+        bot.answer_callback_query(call.id, "⚠️ Channel verification failed. Make sure the channel exists and bot is added as admin.", show_alert=True)
         return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ I have joined WhatsApp", callback_data="whatsapp_done")]
-    ])
-    await callback.message.answer(
-        "✅ Telegram verification done!\nNow confirm WhatsApp join:",
-        reply_markup=kb
-    )
-    await callback.answer()
+    kb = telebot.types.InlineKeyboardMarkup()
+    kb.add(telebot.types.InlineKeyboardButton("✅ I have joined WhatsApp", callback_data="whatsapp_done"))
+    bot.send_message(user_id, "✅ Telegram verified. Now confirm WhatsApp join:", reply_markup=kb)
+    bot.answer_callback_query(call.id)
 
-# -------------------- WhatsApp Done --------------------
-@router.callback_query(F.data == "whatsapp_done")
-async def whatsapp_done(callback: CallbackQuery):
-    await callback.message.answer(
-        "🎉 Verification Complete!\n\n"
-        "Invite 2 friends using your referral link to unlock your daily gift.\n\n"
-        "Type /status anytime to see your progress.",
-        parse_mode="HTML"
-    )
-    await callback.answer()
+@bot.callback_query_handler(func=lambda c: c.data == "whatsapp_done")
+def handle_whatsapp_done(call):
+    user_id = call.from_user.id
+    ensure_user_record(user_id)
+    bot.send_message(user_id, "🎉 Verification complete! Invite 2 friends to claim the daily code. Use /status and /claim to check.")
+    bot.answer_callback_query(call.id)
 
-# -------------------- Status Command --------------------
-@router.message(Command("status"))
-async def status_cmd(msg: Message):
-    uid = str(msg.from_user.id)
-    if uid not in data:
-        await msg.answer("⚠️ Please use /start first.")
-        return
-
-    total = data[uid]["total_referrals"]
-    used = data[uid]["used_referrals"]
+@bot.message_handler(commands=["status"])
+def handle_status(message):
+    uid = message.from_user.id
+    ensure_user_record(uid)
+    rec = db["users"][str(uid)]
+    total = rec["total_referrals"]
+    used = rec["used_referrals"]
     available = total - used
-    last_claim = data[uid]["last_claim"]
+    bot.send_message(uid,
+                     f"💎 Your Referral Dashboard 💎\n\n"
+                     f"👤 Total Invites: {total}\n"
+                     f"🎁 Codes Claimed (used referrals): {used}\n"
+                     f"🔓 Available Referrals: {available}\n"
+                     f"📅 Last Claim: {rec.get('last_claim') or '—'}\n\n"
+                     f"Use /claim to redeem (2 referrals per code).")
 
-    await msg.answer(
-        f"💎 <b>Your Premium Referral Dashboard</b> 💎\n\n"
-        f"👤 <b>Total Invites:</b> {total}\n"
-        f"🎁 <b>Gift Codes Claimed:</b> {used}\n"
-        f"💰 <b>Available Referrals:</b> {available}\n"
-        f"📅 <b>Last Claim:</b> {last_claim or '—'}\n\n"
-        f"Use /claim to get your gift code if you have 2 or more available referrals.",
-        parse_mode="HTML"
-    )
-
-# -------------------- Claim Command --------------------
-@router.message(Command("claim"))
-async def claim_cmd(msg: Message):
-    uid = str(msg.from_user.id)
-    if uid not in data:
-        await msg.answer("⚠️ Please use /start first.")
-        return
-
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    total = data[uid]["total_referrals"]
-    used = data[uid]["used_referrals"]
-    available = total - used
+@bot.message_handler(commands=["claim"])
+def handle_claim(message):
+    uid = message.from_user.id
+    ensure_user_record(uid)
+    rec = db["users"][str(uid)]
+    available = rec["total_referrals"] - rec["used_referrals"]
+    today = time.strftime("%Y-%m-%d")
 
     if available < 2:
-        await msg.answer("👥 You need at least 2 available referrals to claim your gift!")
+        bot.send_message(uid, "👥 You need at least 2 available referrals to claim a code.")
         return
 
-    if data[uid]["last_claim"] == today:
-        await msg.answer("✅ You've already claimed today's gift. Come back tomorrow!")
+    if rec.get("last_claim") == today:
+        bot.send_message(uid, "✅ You've already claimed today's code. Come back tomorrow.")
         return
 
-    data[uid]["used_referrals"] += 2
-    data[uid]["last_claim"] = today
-    save_data(data)
+    # consume referrals
+    rec["used_referrals"] += 2
+    rec["last_claim"] = today
+    save_data(db)
 
-    await msg.answer(
-        "🎉 Processing your gift code...\n✨ Verified referrals found!\n\n"
-        f"🎯 <b>Your Code:</b> <code>{DAILY_CODE}</code>\n\n"
-        "Keep inviting friends to earn more free codes!",
-        parse_mode="HTML"
-    )
+    bot.send_message(uid, f"🎉 Congrats! Your daily code:\n`{DAILY_CODE}`", parse_mode="Markdown")
 
-# -------------------- Admin: Set Code --------------------
-@router.message(Command("setcode"))
-async def set_code(msg: Message):
-    global DAILY_CODE
-    if msg.from_user.id != ADMIN_ID:
-        await msg.answer("⛔ Unauthorized.")
+# ------------- Admin commands -------------
+@bot.message_handler(commands=["setcode"])
+def handle_setcode(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ You are not authorized.")
         return
-
-    parts = msg.text.split(maxsplit=1)
+    parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await msg.answer("Usage: /setcode NEWCODE")
+        bot.reply_to(message, "Usage: /setcode NEWCODE")
         return
+    global DAILY_CODE
+    DAILY_CODE = parts[1].strip()
+    bot.reply_to(message, f"✅ Daily code updated to: `{DAILY_CODE}`", parse_mode="Markdown")
 
-    DAILY_CODE = parts[1]
-    await msg.answer(f"✅ Daily code updated to: <b>{DAILY_CODE}</b>", parse_mode="HTML")
-
-# -------------------- Admin: Stats --------------------
-@router.message(Command("stats"))
-async def admin_stats(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+@bot.message_handler(commands=["stats"])
+def handle_stats(message):
+    if message.from_user.id != ADMIN_ID:
         return
+    total_users = len(db["all_users"])
+    total_referrals = sum(u["total_referrals"] for u in db["users"].values())
+    total_claims = sum(u.get("used_referrals",0)//2 for u in db["users"].values())
+    bot.reply_to(message,
+                 f"📊 Bot Stats\n\n👥 Users: {total_users}\n🔗 Total Referrals: {total_referrals}\n🎁 Total Claims: {total_claims}")
 
-    total_users = len(data)
-    total_referrals = sum(u["total_referrals"] for u in data.values())
-    total_claims = sum(u["used_referrals"] // 2 for u in data.values())
+@bot.message_handler(commands=["broadcast"])
+def handle_broadcast(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /broadcast Your message here")
+        return
+    text = parts[1]
+    sent = 0
+    # rate limit: 30 msgs / sec -> we'll send with small sleep to be safe
+    for uid in list(db["all_users"]):
+        try:
+            bot.send_message(int(uid), text)
+            sent += 1
+            time.sleep(0.075)  # ~13 msgs/sec safe
+        except Exception:
+            continue
+    bot.reply_to(message, f"✅ Broadcast complete. Attempted: {len(db['all_users'])}, Sent: {sent}")
 
-    await msg.answer(
-        f"📊 <b>Bot Statistics</b>\n\n"
-        f"👥 Total Users: {total_users}\n"
-        f"🔗 Total Referrals: {total_referrals}\n"
-        f"🎁 Total Claims: {total_claims}",
-        parse_mode="HTML"
-    )
+# ------------- Webhook endpoints for Render -------------
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook_post():
+    # Telegram will POST updates here
+    try:
+        json_str = request.get_data().decode("utf-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+    except Exception:
+        logger.exception("Failed to process incoming webhook update.")
+    return "", 200
 
-# -------------------- Run Bot --------------------
-async def main():
-    dp = Dispatcher()
-    dp.include_router(router)
-    print("🤖 Bot is now running (Premium Edition)...")
-    await dp.start_polling(bot)
+@app.route("/", methods=["GET"])
+def set_webhook():
+    # Called once to set the webhook on startup (Render will hit /)
+    if not WEBHOOK_URL:
+        return "RENDER_EXTERNAL_URL not set. Set it in Render env vars.", 500
 
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+
+    ok = bot.set_webhook(url=WEBHOOK_URL)
+    if ok:
+        logger.info(f"Webhook set to: {WEBHOOK_URL}")
+        return "Webhook set successfully ✅", 200
+    else:
+        logger.error("Failed to set webhook.")
+        return "Failed to set webhook", 500
+
+# ------------- Run app -------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    # ensure webhook removed (prevents conflict if previous polling instance existed)
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+
+    logger.info("Starting Flask app (Render webhook mode)...")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
