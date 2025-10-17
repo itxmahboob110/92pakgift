@@ -30,8 +30,15 @@ def index():
     return "Bot is running successfully on Render!", 200
 
 # === Basic command handler ===
-@dp.message(commands=["start"])
-async def start_command(message: types.Message):
+from aiogram import Router, F
+from aiogram.types import Message
+
+router = Router()
+
+@router.message(F.text == "/start")
+async def start_handler(message: Message):
+    ...
+
     await message.answer("🎉 Welcome! Your bot is live and working perfectly on Render.")
 
 @dp.message(commands=["help"])
