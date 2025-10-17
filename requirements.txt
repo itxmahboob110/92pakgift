@@ -11,6 +11,7 @@ Flask==3.0.3
 idna==3.11
 magic-filter==1.0.12
 multidict==6.7.0
+pyTelegramBotAPI==4.14.1
 propcache==0.4.1
 pydantic==2.11.10
 pydantic_core==2.33.2
