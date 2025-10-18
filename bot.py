@@ -1,23 +1,19 @@
 import os
 import logging
-import json
+from collections import defaultdict
 from datetime import datetime, date
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest
-from collections import defaultdict # Naya import for better data handling
+import asyncio # Delay ke liye zaroori
 
 # --- Configuration (Environment Variables se load hongi) ---
-# Naye code mein Data store karne ke liye variables ki zaroorat nahin
+# NOTE: Render variables mein inki values sahih honi chahiye.
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-# CHANNEL_ID_1 ab NUMERICAL ID (-100...) for VERIFICATION
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") 
-# CHANNEL_USERNAME ab USERNAME (@...) for BUTTON LINK
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") 
-WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") 
-
-# Initial Gift Code
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Numerical ID (-100...) for VERIFICATION
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") # Username (@...) for BUTTON LINK
+WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") # WhatsApp Link
 GIFT_CODE = os.environ.get("GIFT_CODE", "92pak")
 
 # Logging Setup
@@ -26,17 +22,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Data Store (In-Memory Dictionary) ---
-# NOTE: Render restart hone par data loss hoga. Yeh sirf testing ke liye hai.
+# --- Data Store (In-Memory Dictionary - TESTING ONLY) ---
 user_data = defaultdict(lambda: {
     "total_invites": 0,
     "available_invites": 0,
     "last_claimed_date": "1970-01-01",
     "channels_verified": False,
-    "referrer_tracked": None # Track if a referral has been credited
+    "referrer_tracked": None
 })
 
-# --- CORE VERIFICATION FUNCTION (ROBUST) ---
+# --- CORE VERIFICATION FUNCTION ---
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
     """Checks if the user is a member of the given channel."""
     try:
@@ -59,7 +54,6 @@ async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
 # --- Custom Keyboards ---
 async def get_main_keyboard(context, user_id):
     """Generates the main command buttons."""
-    # Bot username is needed for referral link
     if 'BOT_USERNAME' not in context.bot_data:
         bot_info = await context.bot.get_me()
         context.bot_data['BOT_USERNAME'] = bot_info.username
@@ -77,7 +71,6 @@ async def get_main_keyboard(context, user_id):
 
 def get_verification_keyboard():
     """Generates the initial channel verification buttons."""
-    # CHANNEL_USERNAME ka istemaal
     telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}" 
     
     keyboard = [
@@ -91,9 +84,8 @@ def get_verification_keyboard():
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /start command, registers user, and tracks referrals."""
     user_id = update.effective_user.id
-    user_data_entry = user_data[user_id] # Fetch user data
+    user_data_entry = user_data[user_id]
     
-    # Store bot username in context.bot_data (safer than os.environ)
     if 'BOT_USERNAME' not in context.bot_data:
         bot_info = await context.bot.get_me()
         context.bot_data['BOT_USERNAME'] = bot_info.username
@@ -161,7 +153,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     user = user_data[user_id]
     
-    # 🚨 FIX 1: Verification check
     if query.data == 'verify_check':
         logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
         is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1) 
@@ -181,162 +172,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode='Markdown'
         )
         
-        import asyncio
         await asyncio.sleep(1) 
         
         await send_main_menu(update, context)
-
-    # 🚨 FIX 2: Status check (Ab yeh 'elif' theek hai)
-    elif query.data == 'status':
-        # Status Logic 
-        claim_status = ""
-        invites_needed = 2
-        
-        if user["available_invites"] >= invites_needed:
-             claim_status = "**Mubarak!** Aap code claim karne ke liye tayyar hain. '🎁 Claim Gift Code' button dabayein."
-        else:
-            remaining = invites_needed - user["available_invites"]
-            claim_status = f"**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
-
-        status_message = (
-            f"📊 **Aapka Referral Status**\n"
-            "-----------------------------------\n"
-            f"👥 Total Invites: **{user['total_invites']}**\n"
-            "-----------------------------------\n"
-            f"💰 Available Invites for Claim: **{user['available_invites']}**\n\n"
-            f"**Claim Status:** {claim_status}"
-        )
-        
-        await query.edit_message_text(
-            status_message,
-            reply_markup=await get_main_keyboard(context, user_id), 
-            parse_mode='Markdown'
-        )
-
-    # 🚨 FIX 3: Claim check (Ab yeh 'elif' bhi theek hai)
-    elif query.data == 'claim':
-        # Claim Logic 
-        today_str = date.today().isoformat()
-        invites_needed = 2
-
-        if not user['channels_verified']:
-             await query.edit_message_text(
-                "❌ **Pehle Verification:** Code claim karne se pehle zaroori channels join aur verify karein.",
-                reply_markup=get_verification_keyboard(),
-                parse_mode='Markdown'
-            )
-             return
-
-        if user["last_claimed_date"] == today_str:
-            await query.edit_message_text(
-                "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
-            )
-            return
-
-        if user["available_invites"] < invites_needed:
-            remaining = invites_needed - user["available_invites"]
-            await query.edit_message_text(
-                f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
-            )
-            return
-
-        # Successful Claim
-        user["available_invites"] -= invites_needed
-        user["last_claimed_date"] = today_str
-        global GIFT_CODE
-        
-        message = (
-            "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
-            f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
-            f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
-            "--------------------------\n"
-            f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain."
-        )
-        await query.edit_message_text(message, parse_mode='Markdown')
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
-        )
-        await send_main_menu(update, context)
-    elif query.data == 'status':
-        # Status Logic 
-        claim_status = ""
-        invites_needed = 2
-        
-        if user["available_invites"] >= invites_needed:
-             claim_status = "**Mubarak!** Aap code claim karne ke liye tayyar hain. '🎁 Claim Gift Code' button dabayein."
-        else:
-            remaining = invites_needed - user["available_invites"]
-            claim_status = f"**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
-
-        status_message = (
-            f"📊 **Aapka Referral Status**\n"
-            "-----------------------------------\n"
-            f"👥 Total Invites: **{user['total_invites']}**\n"
-            f"💰 Available Invites for Claim: **{user['available_invites']}**\n\n"
-            f"**Claim Status:** {claim_status}\n"
-            "-----------------------------------\n"
-            f"({datetime.now().strftime('%H:%M:%S')})"
-        )
-        
-        await query.edit_message_text(
-            status_message,
-            reply_markup=await get_main_keyboard(context, user_id), 
-            parse_mode='Markdown'
-        )
-
-    # Claim check (Ab yeh 'elif' bhi theek hai)
-    elif query.data == 'claim':
-        # Claim Logic 
-        today_str = date.today().isoformat()
-        invites_needed = 2
-
-        if not user['channels_verified']:
-             await query.edit_message_text(
-                "❌ **Pehle Verification:** Code claim karne se pehle zaroori channels join aur verify karein.",
-                reply_markup=get_verification_keyboard(),
-                parse_mode='Markdown'
-            )
-             return
-
-        if user["last_claimed_date"] == today_str:
-            await query.edit_message_text(
-                "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
-            )
-            return
-
-        if user["available_invites"] < invites_needed:
-            remaining = invites_needed - user["available_invites"]
-            await query.edit_message_text(
-                f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
-            )
-            return
-
-        # Successful Claim
-        user["available_invites"] -= invites_needed
-        user["last_claimed_date"] = today_str
-        global GIFT_CODE
-        
-        message = (
-            "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
-            f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
-            f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
-            "--------------------------\n"
-            f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain."
-        )
-        await query.edit_message_text(message, parse_mode='Markdown')
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
-        )
-        await send_main_menu(update, context)
-        else:
-            logger.info(f"🔴 VERIFICATION FAILED for user {user_id}")
-            await query.edit_message_text(
-                "❌ **Verification Nakam!** Aapne zaroori Telegram Channel join nahi kiya hai. Pehle join karein aur phir dobara koshish karein.",
-                reply_markup=get_verification_keyboard(),
-                parse_mode='Markdown'
-            )
 
     elif query.data == 'status':
         # Status Logic 
