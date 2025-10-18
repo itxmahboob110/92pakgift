@@ -5,24 +5,21 @@ from datetime import datetime, date
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest
-import asyncio # Delay ke liye zaroori
+import asyncio
 
-# --- Configuration (Environment Variables se load hongi) ---
-# NOTE: Render variables mein inki values sahih honi chahiye.
+# --- CONFIG ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Numerical ID (-100...) for VERIFICATION
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") # Username (@...) for BUTTON LINK
-WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") # WhatsApp Link
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1")  # NUMERIC (-100...)
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")  # @username
+WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink")
 GIFT_CODE = os.environ.get("GIFT_CODE", "92pak")
 
-# Logging Setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Data Store (In-Memory Dictionary - TESTING ONLY) ---
 user_data = defaultdict(lambda: {
     "total_invites": 0,
     "available_invites": 0,
@@ -31,35 +28,28 @@ user_data = defaultdict(lambda: {
     "referrer_tracked": None
 })
 
-# --- CORE VERIFICATION FUNCTION ---
+
+# --- VERIFY MEMBERSHIP ---
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
-    """Checks if the user is a member of the given channel."""
     try:
+        logger.info(f"🔍 Checking membership: user={user_id}, chat_id={chat_id}")
         member = await bot.get_chat_member(chat_id, user_id)
+        logger.info(f"✅ Member status: {member.status}")
         return member.status in ['member', 'administrator', 'creator']
-    
     except BadRequest as e:
-        error_msg = str(e).lower()
-        if 'user not found' in error_msg or 'user not participant' in error_msg or 'chat not found' in error_msg:
-            logger.warning(f"⚠️ VERIFICATION FAILED (User/Chat issue) for {user_id} in {chat_id}: {e}")
-            return False
-        
-        logger.error(f"🚨 CRITICAL BADREQUEST ERROR: {e}")
+        logger.warning(f"⚠️ Verification error (BadRequest): {e}")
         return False
-        
     except Exception as e:
-        logger.error(f"🚨 UNEXPECTED ERROR during verification for {user_id}: {e}")
+        logger.error(f"🚨 Unexpected verification error: {e}")
         return False
-        
-# --- Custom Keyboards ---
+
+
+# --- KEYBOARDS ---
 async def get_main_keyboard(context, user_id):
-    """Generates the main command buttons."""
     if 'BOT_USERNAME' not in context.bot_data:
         bot_info = await context.bot.get_me()
         context.bot_data['BOT_USERNAME'] = bot_info.username
-        
     referral_link = f"https://t.me/{context.bot_data['BOT_USERNAME']}?start={user_id}"
-    
     keyboard = [
         [InlineKeyboardButton("🔗 Reffer Link (Doston Ko Invite Karein)", url=referral_link)],
         [
@@ -69,56 +59,52 @@ async def get_main_keyboard(context, user_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def get_verification_keyboard():
-    """Generates the initial channel verification buttons."""
-    telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}" 
-    
+    telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}"
     keyboard = [
         [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=telegram_link)],
-        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)], 
+        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)],
         [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Handlers ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /start command, registers user, and tracks referrals."""
+
+# --- HANDLERS ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data_entry = user_data[user_id]
-    
+
     if 'BOT_USERNAME' not in context.bot_data:
         bot_info = await context.bot.get_me()
         context.bot_data['BOT_USERNAME'] = bot_info.username
 
-    # Referral Tracking Logic
+    # Referral Logic
     if context.args and context.args[0].isdigit():
         referrer_id = int(context.args[0])
-        
         if referrer_id != user_id and user_data_entry["referrer_tracked"] is None:
             referrer_data = user_data[referrer_id]
             referrer_data["total_invites"] += 1
             referrer_data["available_invites"] += 1
             user_data_entry["referrer_tracked"] = referrer_id
-            
             await context.bot.send_message(
-                referrer_id, 
-                f"🎉 Mubarak! Aapke invite link se **{update.effective_user.first_name}** join hua hai. Ab aapke paas **{referrer_data['available_invites']}** available invites hain."
+                referrer_id,
+                f"🎉 Mubarak! Aapke invite link se **{update.effective_user.first_name}** join hua hai.\n"
+                f"Aapke paas ab **{referrer_data['available_invites']}** available invites hain."
             )
-            
+
     if user_data_entry['channels_verified']:
-        await send_main_menu(update, context) 
+        await send_main_menu(update, context)
     else:
         await send_verification_step(update, context)
 
 
-async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the initial verification step with buttons."""
+async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "**Asslam-o-Alaikum everyone !!**\n"
         "🥳 **WELCOME TO OUR FREE GIFT CODE BOT**\n\n"
-        "Peelay Zaroori **Verification** Karein taake aap aagay badh saken:"
+        "Zaroori **Verification** karein taake aap aagay badh saken:"
     )
-    
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text,
@@ -127,18 +113,15 @@ async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the welcome message and main menu keyboard."""
+async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data_entry = user_data[user_id]
-    
     welcome_text = (
         "**KhushAamdeed !!**\n\n"
-        "Aapko yahan pr daily **92Pak** kay Giftcodes Mila Karen Gay.🎁\n"
-        "Requirments Yeh hai Keh Aapko **2 Bandy Invite** Karne Hoon Gay !!\n\n"
-        f"Aapkay paas abhi **{user_data_entry['available_invites']}** invites available hain."
+        "Yahan aapko daily **92Pak** kay Gift Codes milain gay. 🎁\n"
+        "Requirments: **2 banday invite** karne zaroori hain!\n\n"
+        f"Aapke paas abhi **{user_data_entry['available_invites']}** invites available hain."
     )
-    
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=welcome_text,
@@ -146,112 +129,96 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode='Markdown'
     )
 
-async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles button clicks."""
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     user = user_data[user_id]
-    
-    if query.data == 'verify_check':
-        logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
-        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1) 
-        
-        # Safety Override: Verification hamesha grant ho jayegi for testing
-        user['channels_verified'] = True 
-        
-        if is_ch1_joined:
-            logger.info(f"🟢 VERIFICATION SUCCESS for user {user_id}")
-            message_text = "✅ **Verification Kamyab!** Aapne zaroori channels join kar liye hain. Aagay badhein."
-        else:
-            logger.info(f"🔴 VERIFICATION FAILED by API for user {user_id} but granting access for testing.")
-            message_text = "⚠️ **Verification Nakam!** (Lekin aap aagay badh sakte hain) Zaroor check karein ke aapne channel join kiya hai. Aagay badhein."
 
-        await query.edit_message_text(
-            message_text,
-            parse_mode='Markdown'
-        )
-        
-        await asyncio.sleep(1) 
-        
-        await send_main_menu(update, context)
+    if query.data == 'verify_check':
+        logger.info(f"➡️ VERIFY CHECK started for user {user_id}")
+        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
+
+        if is_ch1_joined:
+            user['channels_verified'] = True
+            logger.info(f"🟢 VERIFICATION SUCCESS for {user_id}")
+            message_text = "✅ **Verification Kamyab!** Aapne zaroori channels join kar liye hain. Aagay badhein."
+            await query.edit_message_text(message_text, parse_mode='Markdown')
+            await asyncio.sleep(1)
+            await send_main_menu(update, context)
+        else:
+            logger.info(f"🔴 VERIFICATION FAILED for {user_id}")
+            await query.edit_message_text(
+                "❌ **Verification Nakam!** Pehle channel join karein phir dobara try karein.",
+                reply_markup=get_verification_keyboard(),
+                parse_mode='Markdown'
+            )
 
     elif query.data == 'status':
-        # Status Logic 
-        claim_status = ""
         invites_needed = 2
-        
         if user["available_invites"] >= invites_needed:
-             claim_status = "**Mubarak!** Aap code claim karne ke liye tayyar hain. '🎁 Claim Gift Code' button dabayein."
+            claim_status = "**Mubarak!** Aap code claim kar sakte hain!"
         else:
             remaining = invites_needed - user["available_invites"]
-            claim_status = f"**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
+            claim_status = f"**Agla Code:** Mazeed **{remaining}** invites chahiye."
 
         status_message = (
-            f"📊 **Aapka Referral Status**\n"
-            "-----------------------------------\n"
+            f"📊 **Referral Status**\n"
             f"👥 Total Invites: **{user['total_invites']}**\n"
-            f"💰 Available Invites for Claim: **{user['available_invites']}**\n\n"
-            f"**Claim Status:** {claim_status}\n"
-            "-----------------------------------\n"
-            f"({datetime.now().strftime('%H:%M:%S')})"
+            f"💰 Available Invites: **{user['available_invites']}**\n\n"
+            f"{claim_status}\n({datetime.now().strftime('%H:%M:%S')})"
         )
-        
         await query.edit_message_text(
             status_message,
-            reply_markup=await get_main_keyboard(context, user_id), 
+            reply_markup=await get_main_keyboard(context, user_id),
             parse_mode='Markdown'
         )
 
     elif query.data == 'claim':
-        # Claim Logic 
         today_str = date.today().isoformat()
         invites_needed = 2
 
         if not user['channels_verified']:
-             await query.edit_message_text(
-                "❌ **Pehle Verification:** Code claim karne se pehle zaroori channels join aur verify karein.",
+            await query.edit_message_text(
+                "❌ Pehle verification complete karein.",
                 reply_markup=get_verification_keyboard(),
                 parse_mode='Markdown'
             )
-             return
+            return
 
         if user["last_claimed_date"] == today_str:
             await query.edit_message_text(
-                "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
+                "⏳ Aaj ka code pehle hi claim ho chuka hai."
             )
             return
 
         if user["available_invites"] < invites_needed:
             remaining = invites_needed - user["available_invites"]
             await query.edit_message_text(
-                f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
+                f"❌ Sirf {user['available_invites']} invites hain. {remaining} aur chahiye."
             )
             return
 
-        # Successful Claim
         user["available_invites"] -= invites_needed
         user["last_claimed_date"] = today_str
         global GIFT_CODE
-        
+
         message = (
-            "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
-            f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
-            f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
-            "--------------------------\n"
-            f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain."
+            "🎉 **Mubarak ho!**\n"
+            f"🎮 **Aapka Gift Code:** `{GIFT_CODE}`\n\n"
+            "Agla code aap kal ya 2 naye invites milne par claim kar sakte hain."
         )
         await query.edit_message_text(message, parse_mode='Markdown')
         await context.bot.send_message(
             ADMIN_ID,
-            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
+            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne code claim kar liya."
         )
         await send_main_menu(update, context)
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Update '%s' caused error '%s'", update, context.error)
-    # Admin ko error notification
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"❌ Error: {context.error}")
     if update and update.effective_user and update.effective_user.id != ADMIN_ID:
         try:
             await context.bot.send_message(
@@ -259,56 +226,46 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"🚨 Error in Bot: {context.error}"
             )
         except:
-             pass
+            pass
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text.startswith('/'):
-        await update.message.reply_text("Maaf kijiye, main is command ko nahi samajh paya. Menu ke liye /start type karein.")
+        await update.message.reply_text("Maaf kijiye, yeh command samajh nahi aayi. /start likhein.")
     else:
-        # Check if user is verified before sending main menu
         if user_data[update.effective_user.id]['channels_verified']:
-             await send_main_menu(update, context)
+            await send_main_menu(update, context)
 
 
-async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global GIFT_CODE
-    
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Aapke paas yeh command istemaal karne ki permission nahi hai.")
         return
-
     if not context.args:
-        await update.message.reply_text(f"❌ Istemaal: `/setcode <NEW_CODE>`. Current code hai: `{GIFT_CODE}`")
+        await update.message.reply_text(f"❌ Istemaal: `/setcode <NEW_CODE>`. Current: `{GIFT_CODE}`", parse_mode='Markdown')
         return
-
     new_code = " ".join(context.args)
     GIFT_CODE = new_code
-    
-    await update.message.reply_text(
-        f"✅ **Success!** Naya Daily Gift Code set kar diya gaya hai: `{GIFT_CODE}`"
-    )
+    await update.message.reply_text(f"✅ Naya code set: `{GIFT_CODE}`", parse_mode='Markdown')
 
-def main() -> None:
-    # Final check: Zaroori Environment Variables
+
+def main():
     if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not CHANNEL_USERNAME:
-        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya Render settings check karein. (BOT_TOKEN, ADMIN_ID, CHANNEL_ID_1, CHANNEL_USERNAME lazmi hain!)")
+        logger.error("❌ Environment variables missing! (BOT_TOKEN, ADMIN_ID, CHANNEL_ID_1, CHANNEL_USERNAME required)")
         return
-        
-    # Application banane se pehle user_data ko Application ke saath attach karen
+
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setcode", setcode_command))
-    application.add_handler(CallbackQueryHandler(handle_callback_query)) 
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
-    
     application.add_error_handler(error_handler)
 
-    # --- Run in Polling Mode (To avoid Webhook/Render Timeouts) ---
-    application.run_polling(poll_interval=1.0) # Har 1 second mein updates check karega
-    logger.info("Bot started successfully in Polling mode.")
+    application.run_polling(poll_interval=1.0)
+    logger.info("✅ Bot started successfully.")
+
 
 if __name__ == "__main__":
     main()
