@@ -3,7 +3,7 @@ import logging
 import json
 from datetime import datetime, date
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # --- Configuration (Environment Variables se load hongi) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
