@@ -2,6 +2,7 @@ import os
 import logging
 import json
 from datetime import datetime, date
+from telegram.error import BadRequest
 # Yeh hai woh line jismein Application, CallbackQueryHandler aur dusri classes hain
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -58,11 +59,33 @@ def get_user(user_id):
         }
     return user_data[user_id_str]
 
+from telegram.error import BadRequest  # 👈 YEH LINE ZAROOR IMPORT KAREIN
+
+# ...
+# ... (Baaki code) ...
+# ...
+
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
+    """Checks if the user is a member of the given channel by handling exceptions properly."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
+        
+        # Check if the user is a valid member status
         return member.status in ['member', 'administrator', 'creator']
-    except Exception:
+    
+    except BadRequest as e:
+        # User is not a member OR the chat ID is incorrect.
+        # Most common error for 'User is not a member of the chat' is a BadRequest
+        if 'user not found' in str(e) or 'user not participant' in str(e):
+            return False # User is definitely NOT a member
+        
+        # If any other BadRequest error occurs (e.g., bot not admin, ID issue), log it.
+        logger.error(f"Telegram API BadRequest during verification for {user_id} in {chat_id}: {e}")
+        return False
+        
+    except Exception as e:
+        # Catch all other unexpected errors (e.g., network, or unhandled)
+        logger.error(f"Unexpected error during verification for {user_id}: {e}")
         return False
 
 # --- Custom Keyboards ---
