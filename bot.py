@@ -1,65 +1,92 @@
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import Update
-from aiogram.fsm.storage.memory import MemoryStorage
-from flask import Flask, request
 import asyncio
-
-# === Load environment variable ===
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise Exception("TELEGRAM_BOT_TOKEN not found in environment variables!")
-
-# === Initialize bot and dispatcher ===
-bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-# === Flask App for Webhook ===
-app = Flask(__name__)
-
-# === Webhook route ===
-@app.route(f"/{TOKEN}", methods=["POST"])
-async def telegram_webhook():
-    update = Update.model_validate(await request.get_json())
-    await dp.feed_update(bot, update)
-    return "OK", 200
-
-# === Test route ===
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is running successfully on Render!", 200
-
-# === Basic command handler ===
-from aiogram import Router, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message
+from aiogram.enums import ParseMode
+from dotenv import load_dotenv
+from flask import Flask
+import threading
 
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
 router = Router()
 
+# Data store
+referrals = {}
+
+# Flask for Render keep-alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running fine!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
+# --- Handlers ---
+
 @router.message(F.text == "/start")
-async def start_handler(message: Message):
-    ...
+async def start_command(message: Message):
+    args = message.text.split()
+    referrer = None
 
-    await message.answer("🎉 Welcome! Your bot is live and working perfectly on Render.")
+    if len(args) > 1:
+        referrer = args[1]
 
-@dp.message(commands=["help"])
-async def help_command(message: types.Message):
-    await message.answer("Here are your available commands:\n/start - Start bot\n/help - Help info")
+    user_id = str(message.from_user.id)
+    if user_id not in referrals:
+        referrals[user_id] = {"referrals": [], "referrer": None}
 
-# === Main setup ===
-async def on_startup():
-    webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}"
-    await bot.set_webhook(webhook_url)
-    print(f"✅ Webhook set: {webhook_url}")
+    if referrer and referrer != user_id:
+        if referrer not in referrals:
+            referrals[referrer] = {"referrals": [], "referrer": None}
+        if user_id not in referrals[referrer]["referrals"]:
+            referrals[referrer]["referrals"].append(user_id)
+            referrals[user_id]["referrer"] = referrer
+            await message.answer(f"🎉 You were referred by <b>{referrer}</b>!")
+        else:
+            await message.answer("⚠️ Already referred by this user.")
+    elif referrer == user_id:
+        await message.answer("⚠️ You can't refer yourself!")
 
-async def on_shutdown():
-    await bot.delete_webhook()
-    await bot.session.close()
-    print("❌ Webhook removed and bot stopped.")
+    link = f"https://t.me/{(await bot.get_me()).username}?start={user_id}"
+    await message.answer(
+        f"👋 Welcome {message.from_user.first_name}!\n"
+        f"Your referral link:\n{link}\n\n"
+        f"💰 Total referrals: {len(referrals[user_id]['referrals'])}"
+    )
 
-def run():
-    loop = asyncio.get_event_loop()
-    loop.create_task(on_startup())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+@router.message(F.text == "/help")
+async def help_command(message: Message):
+    await message.answer(
+        "🧠 Commands:\n"
+        "/start - Get your referral link\n"
+        "/help - Show this message\n"
+        "/stats - View your referral stats"
+    )
+
+@router.message(F.text == "/stats")
+async def stats_command(message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in referrals:
+        await message.answer("❌ You haven't started the bot yet. Use /start.")
+        return
+
+    ref_count = len(referrals[user_id]["referrals"])
+    await message.answer(f"📊 You have {ref_count} referrals!")
+
+# Register router
+dp.include_router(router)
+
+async def main():
+    print("🤖 Bot running...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    run()
+    threading.Thread(target=run_flask).start()
+    asyncio.run(main())
