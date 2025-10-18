@@ -4,13 +4,16 @@ import json
 from datetime import datetime, date
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest # Telegram API errors handle karne ke liye
+from telegram.error import BadRequest 
 
 # --- Configuration (Environment Variables se load hongi) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Telegram Channel ID/Username (-100...)
-WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink")
+# CHANNEL_ID_1 ab NUMERICAL ID hai (-100...) for VERIFICATION
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") 
+# CHANNEL_USERNAME ab USERNAME hai (@...) for BUTTON LINK
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") 
+WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8080))
 GIFT_CODE = os.environ.get("GIFT_CODE", "92pak")
@@ -21,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Data Handling (Non-persistent - For testing) ---
+# --- Data Handling (Unchanged) ---
 user_data = {}
 def load_data():
     global user_data, GIFT_CODE
@@ -53,12 +56,11 @@ def get_user(user_id):
         }
     return user_data[user_id_str]
 
-# --- CORE VERIFICATION FUNCTION ---
+# --- CORE VERIFICATION FUNCTION (UNCHANGED/ROBUST) ---
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
     """Checks if the user is a member of the given channel."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-        # Check for valid membership status
         if member.status in ['member', 'administrator', 'creator']:
             logger.info(f"✅ USER {user_id} IS MEMBER of {chat_id}. Status: {member.status}")
             return True
@@ -67,13 +69,11 @@ async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
             return False
     
     except BadRequest as e:
-        # Common errors when user is not found or chat ID is wrong
         error_msg = str(e).lower()
         if 'user not found' in error_msg or 'user not participant' in error_msg:
             logger.warning(f"⚠️ VERIFICATION FAILED (User not participant) for {user_id} in {chat_id}")
             return False
         
-        # If the bot is NOT ADMIN or CHAT ID IS WRONG
         logger.error(f"🚨 CRITICAL BADREQUEST ERROR (Check ID/Admin status): {e}")
         return False
         
@@ -81,8 +81,10 @@ async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
         logger.error(f"🚨 UNEXPECTED ERROR during verification for {user_id}: {e}")
         return False
         
-# --- Custom Keyboards (Unchanged) ---
-async def get_main_keyboard(user_id):
+# --- Custom Keyboards (ASYNC/AWAIT FIX) ---
+
+# ASYNC function for main keyboard (Q k isay BOT_USERNAME ki zaroorat hai)
+async def get_main_keyboard(context, user_id):
     """Generates the main command buttons."""
     # Ensure BOT_USERNAME is available for referral link
     if 'BOT_USERNAME' not in os.environ:
@@ -100,11 +102,14 @@ async def get_main_keyboard(user_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# SYNC function for verification keyboard (Q k isay sirf CHANNEL_USERNAME chahiye)
 def get_verification_keyboard():
     """Generates the initial channel verification buttons."""
+    # CHANNEL_USERNAME ka istemaal
+    telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}" 
+    
     keyboard = [
-        # Note: WhatsApp is NOT being verified by code, only Telegram
-        [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=f"https://t.me/{CHANNEL_ID_1.replace('@', '')}")],
+        [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=telegram_link)],
         [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)], 
         [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
     ]
@@ -112,32 +117,17 @@ def get_verification_keyboard():
 
 # --- Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /start command, registers user, and tracks referrals."""
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
     
-   # Change 1: Configuration block mein naya variable CHANNEL_USERNAME add karein:
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Numerical ID (-100...) for VERIFICATION
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") # Username (@color_trader_expert) for LINKING
+    # Set bot username for referral link (Safe check)
+    if 'BOT_USERNAME' not in os.environ:
+        bot_info = await context.bot.get_me()
+        os.environ['BOT_USERNAME'] = bot_info.username
 
-# Change 2: get_verification_keyboard function ko is tarah badlein:
-def get_verification_keyboard():
-    """Generates the initial channel verification buttons."""
-    # Channel link banane ke liye CHANNEL_USERNAME ka istemaal
-    telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}" 
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=telegram_link)],
-        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)],
-        [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# Change 3: main() function mein zaroori variables ki check list ko badlein:
-def main() -> None:
-    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not CHANNEL_USERNAME or not WEBHOOK_URL:
-        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein. WHATSAPP_LINK optional hai.")
-        return
-# ... (Baaki code jaisa hai waisa hi rahega)
+    # Referral Tracking Logic (Unchanged)
+    if context.args and context.args[0].isdigit():
         referrer_id = context.args[0]
         referrer_id_str = str(referrer_id)
         if referrer_id_str != str(user_id) and user_data_entry.get("referrer_tracked") is None:
@@ -145,6 +135,7 @@ def main() -> None:
             referrer_data["total_invites"] += 1
             referrer_data["available_invites"] += 1
             user_data_entry["referrer_tracked"] = referrer_id
+            
             await context.bot.send_message(
                 referrer_id, 
                 f"🎉 Mubarak! Aapke invite link se **{update.effective_user.first_name}** join hua hai. Ab aapke paas **{referrer_data['available_invites']}** available invites hain."
@@ -152,12 +143,13 @@ def main() -> None:
             save_data()
             
     if user_data_entry['channels_verified']:
-        await send_main_menu(update, context)
+        await send_main_menu(update, context) # Await is zaroori
     else:
-        await send_verification_step(update, context)
+        await send_verification_step(update, context) # Await is zaroori
 
 
 async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the initial verification step with buttons."""
     text = (
         "**Asslam-o-Alaikum everyone !!**\n"
         "🥳 **WELCOME TO OUR FREE GIFT CODE BOT**\n\n"
@@ -173,6 +165,7 @@ async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the welcome message and main menu keyboard."""
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
     
@@ -186,22 +179,21 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=welcome_text,
-        reply_markup=await get_main_keyboard(user_id),
+        reply_markup=await get_main_keyboard(context, user_id), # Await is zaroori
         parse_mode='Markdown'
     )
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button clicks."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     user = get_user(user_id)
     
     if query.data == 'verify_check':
-        # Channel Verification Logic
         logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
-        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
-        
-        # NOTE: Only Telegram channel join is required for verification to proceed
+        # CHANNEL_ID_1 (Numerical ID) for verification
+        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1) 
         
         if is_ch1_joined:
             user['channels_verified'] = True
@@ -220,10 +212,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode='Markdown'
             )
 
-    # ... (status and claim logic remains the same) ...
     elif query.data == 'status':
-        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
-        
+        # Status Logic 
         claim_status = ""
         invites_needed = 2
         
@@ -243,13 +233,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             f"({datetime.now().strftime('%H:%M:%S')})"
         )
         
+        # Await is zaroori
         await query.edit_message_text(
             status_message,
-            reply_markup=await get_main_keyboard(user_id),
+            reply_markup=await get_main_keyboard(context, user_id), 
             parse_mode='Markdown'
         )
 
     elif query.data == 'claim':
+        # Claim Logic (Unchanged)
         today_str = date.today().isoformat()
         invites_needed = 2
 
@@ -335,8 +327,9 @@ async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 def main() -> None:
-    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not WEBHOOK_URL:
-        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein. WHATSAPP_LINK optional hai.")
+    # Final check: Channel Username bhi zaroori hai
+    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not CHANNEL_USERNAME or not WEBHOOK_URL:
+        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein. CHANNEL_USERNAME aur CHANNEL_ID_1 dono zaroori hain!")
         return
         
     load_data()
@@ -345,7 +338,7 @@ def main() -> None:
     # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setcode", setcode_command))
-    application.add_handler(CallbackQueryHandler(handle_callback_query)) # Button clicks
+    application.add_handler(CallbackQueryHandler(handle_callback_query)) 
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
     
