@@ -66,13 +66,14 @@ def home():
 if __name__ == "__main__":
     import asyncio
 
-    async def run():
+    async def main():
         await application.initialize()
         await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
         await application.start()
-        print("✅ Bot is live on Render with Webhook!")
+        print("✅ Webhook connected to Telegram.")
 
-        # Keep running forever
-        await asyncio.Event().wait()
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
 
-    asyncio.run(run())
+    asyncio.run(main())
+
