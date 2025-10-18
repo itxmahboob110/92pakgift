@@ -72,7 +72,14 @@ if __name__ == "__main__":
         await application.start()
         print("✅ Webhook connected to Telegram.")
 
-        port = int(os.environ.get("PORT", 5000))
+        # Fix for empty PORT from Render
+        port_env = os.environ.get("PORT")
+        try:
+            port = int(port_env) if port_env else 5000
+        except ValueError:
+            port = 5000
+
+        print(f"🌐 Running Flask server on port {port}")
         app.run(host="0.0.0.0", port=port)
 
     asyncio.run(main())
