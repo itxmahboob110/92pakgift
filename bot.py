@@ -2,22 +2,17 @@ import os
 import logging
 import json
 from datetime import datetime, date
-from telegram import Update, Bot
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 # --- Configuration (Environment Variables se load hongi) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Apna User ID yahaan daalein
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Pehle Telegram Channel ka ID
-CHANNEL_ID_2 = os.environ.get("CHANNEL_ID_2") # Dusre Telegram Channel/Group ka ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Telegram Channel ID/Username
+WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") # WhatsApp Link
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8080))
-# Initial gift code, jo admin badal sakta hai
 GIFT_CODE = os.environ.get("GIFT_CODE", "92pak")
-
-# Non-persistent data store (WARNING: Restart hone par data loss hoga)
-# Production ke liye PostgreSQL ya koi persistent database istemaal karein.
-user_data = {}
 
 # Logging Setup
 logging.basicConfig(
@@ -25,10 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions ---
-
+# --- Data Handling (Pichla Non-persistent Data System) ---
+user_data = {}
+# ... (load_data and save_data functions remain the same as before) ...
+# Note: For simplicity and continuity, keeping the non-persistent data functions.
 def load_data():
-    """Load data from a non-persistent way (just for demonstration)."""
     global user_data, GIFT_CODE
     try:
         if os.path.exists("data.json"):
@@ -36,42 +32,59 @@ def load_data():
                 data = json.load(f)
                 user_data = data.get("user_data", {})
                 GIFT_CODE = data.get("GIFT_CODE", os.environ.get("GIFT_CODE", "92pak"))
-        logger.info("Data loaded successfully.")
     except Exception as e:
         logger.error(f"Error loading data: {e}")
 
 def save_data():
-    """Save data to a non-persistent way (just for demonstration)."""
     global user_data, GIFT_CODE
     try:
         with open("data.json", "w") as f:
             json.dump({"user_data": user_data, "GIFT_CODE": GIFT_CODE}, f, indent=4)
-        logger.info("Data saved successfully.")
     except Exception as e:
         logger.error(f"Error saving data: {e}")
 
 def get_user(user_id):
-    """Initializes user data if it doesn't exist."""
     user_id_str = str(user_id)
     if user_id_str not in user_data:
         user_data[user_id_str] = {
-            "is_joined_channel_1": False,
-            "is_joined_channel_2": False,
             "total_invites": 0,
-            "available_invites": 0,  # Invites available for daily claim
+            "available_invites": 0,
             "last_claimed_date": "1970-01-01",
+            "channels_verified": False, # New field for initial verification status
         }
     return user_data[user_id_str]
 
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
-    """Checks if the user is a member of the given channel."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-        # Status 'member', 'administrator', 'creator' sab theek hain.
         return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Error checking subscription for {user_id} in {chat_id}: {e}")
+    except Exception:
         return False
+
+# --- Custom Keyboards ---
+
+async def get_main_keyboard(user_id):
+    """Generates the main command buttons."""
+    referral_link = f"https://t.me/@{os.environ.get('BOT_USERNAME')}?start={user_id}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔗 Reffer Link (Doston Ko Invite Karein)", url=referral_link)],
+        [
+            InlineKeyboardButton("📊 Total Reffers (Status Dekhein)", callback_data='status'),
+            InlineKeyboardButton("🎁 Claim Gift Code", callback_data='claim')
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_verification_keyboard():
+    """Generates the initial channel verification buttons."""
+    keyboard = [
+        [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=f"https://t.me/{CHANNEL_ID_1.replace('@', '')}")],
+        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)],
+        [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 # --- Handlers ---
 
@@ -79,157 +92,197 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handles /start command, registers user, and tracks referrals."""
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
-    referrer_id = None
     
-    # 1. Referral Logic
+    # Set bot username for referral link in the first run if not set
+    if 'BOT_USERNAME' not in os.environ:
+        bot_info = await context.bot.get_me()
+        os.environ['BOT_USERNAME'] = bot_info.username
+
+    # Referral Tracking Logic
     if context.args and context.args[0].isdigit():
         referrer_id = context.args[0]
         referrer_id_str = str(referrer_id)
-        
-        # Self-referral check
-        if referrer_id_str == str(user_id):
-            referrer_id = None # Ignore self-referral
-        elif referrer_id_str in user_data and user_data_entry.get("referrer_tracked") is None:
-            # Track referral and reward referrer
+        if referrer_id_str != str(user_id) and user_data_entry.get("referrer_tracked") is None:
             referrer_data = get_user(referrer_id)
             referrer_data["total_invites"] += 1
             referrer_data["available_invites"] += 1
-            user_data_entry["referrer_tracked"] = referrer_id # To prevent multiple tracking
+            user_data_entry["referrer_tracked"] = referrer_id
             await context.bot.send_message(
                 referrer_id, 
-                f"🎉 Mubarak! Aapke invite link se ek naya user ({update.effective_user.full_name}) join hua hai. Ab aapke paas {referrer_data['available_invites']} available invites hain."
+                f"🎉 Mubarak! Aapke invite link se **{update.effective_user.first_name}** join hua hai. Ab aapke paas **{referrer_data['available_invites']}** available invites hain."
             )
             save_data()
+            
+    if user_data_entry['channels_verified']:
+        await send_main_menu(update, context)
+    else:
+        await send_verification_step(update, context)
 
-    # 2. Initial Instructions
-    referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
-    
-    message = (
-        f"Assalam-o-Alaikum, {update.effective_user.first_name}!\n\n"
-        "Gift Code haasil karne ke liye in aasan steps ko poora karein:\n\n"
-        "**Step 1: Channels Join Karein (Zaroori)**\n"
-        f"1. Hamara **Telegram Channel 1** join karein: [Channel 1 Link](https://t.me/{CHANNEL_ID_1.replace('@', '')})\n"
-        f"2. Hamara **Telegram Channel 2** join karein: [Channel 2 Link](https://t.me/{CHANNEL_ID_2.replace('@', '')})\n\n"
-        "(Note: Bot dono channels ki membership verify karega.)\n\n"
-        "**Step 2: Doston ko Invite Karein**\n"
-        "Gift Code claim karne ke liye, aapko kam se kam **2 doston** ko invite karna hoga.\n"
-        "Aapka unique invite link yeh hai:\n"
-        f"`{referral_link}`\n\n"
-        "**Step 3: Code Claim Karein**\n"
-        "Jab aap steps poore kar lein, toh `/claim` command istemaal karein.\n\n"
-        "**Apna Status Dekhne ke liye:** `/status` command istemaal karein."
+
+async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the initial verification step with buttons."""
+    text = (
+        "**Asslam-o-Alaikum everyone !!**\n"
+        "🥳 **WELCOME TO OUR FREE GIFT CODE BOT**\n\n"
+        "Peelay Zaroori **Verification** Karein taake aap aagay badh saken:"
     )
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=text,
+        reply_markup=get_verification_keyboard(),
+        parse_mode='Markdown'
+    )
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows the user's current status and progress."""
+
+async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the welcome message and main menu keyboard."""
     user_id = update.effective_user.id
+    user_data_entry = get_user(user_id)
+    
+    welcome_text = (
+        "**KhushAamdeed !!**\n\n"
+        "Aapko yahan pr daily **92Pak** kay Giftcodes Mila Karen Gay.🎁\n"
+        "Requirments Yeh hai Keh Aapko **2 Bandy Invite** Karne Hoon Gay !!\n\n"
+        f"Aapkay paas abhi **{user_data_entry['available_invites']}** invites available hain."
+    )
+    
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=welcome_text,
+        reply_markup=await get_main_keyboard(user_id),
+        parse_mode='Markdown'
+    )
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button clicks."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
     user = get_user(user_id)
     
-    # Check current channel subscription status
-    is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
-    is_ch2_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_2)
+    if query.data == 'verify_check':
+        # Channel Verification Logic
+        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
+        
+        # NOTE: WhatsApp verification is manual/assumed. We'll proceed if TG is joined.
+        # Agar aap doosra TG channel add karen to yahan logic badal dein.
+        
+        if is_ch1_joined:
+            user['channels_verified'] = True
+            save_data()
+            await query.edit_message_text(
+                "✅ **Verification Kamyab!** Ab aap Gift Code haasil kar sakte hain. Aagay badhein.",
+                parse_mode='Markdown'
+            )
+            await send_main_menu(update, context)
+        else:
+            await query.edit_message_text(
+                "❌ **Verification Nakam!** Aapne Telegram Channel join nahi kiya hai ya bot ko dobara start/verify karna hoga.",
+                reply_markup=get_verification_keyboard(),
+                parse_mode='Markdown'
+            )
 
-    # Update local data (for easier tracking, though not strictly needed here)
-    user["is_joined_channel_1"] = is_ch1_joined
-    user["is_joined_channel_2"] = is_ch2_joined
-    save_data()
-
-    # Calculate remaining invites
-    invites_needed = 2
-    
-    channel_status = (
-        f"✅ Channel 1: {'Joined' if is_ch1_joined else '❌ Not Joined'}\n"
-        f"✅ Channel 2: {'Joined' if is_ch2_joined else '❌ Not Joined'}\n"
-    )
-    
-    claim_status = ""
-    if is_ch1_joined and is_ch2_joined:
-        claim_status = (
-            f"**Invites Status**:\n"
-            f"👥 Total Invites: **{user['total_invites']}**\n"
-            f"🎁 Available Invites for Claim: **{user['available_invites']}**\n"
-        )
+    elif query.data == 'status':
+        # Status Logic (using existing logic but formatted better)
+        is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
+        
+        claim_status = ""
+        invites_needed = 2
+        
         if user["available_invites"] >= invites_needed:
-             claim_status += "\n**Mubarak!** Aap code claim karne ke liye tayyar hain. `/claim` type karein."
+             claim_status = "**Mubarak!** Aap code claim karne ke liye tayyar hain. '🎁 Claim Gift Code' button dabayein."
         else:
             remaining = invites_needed - user["available_invites"]
-            claim_status += f"\n**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
-    else:
-        claim_status = "\n**CODE CLAIM NAHI HO SAKTA:** Pehle dono channels join karein (Step 1)."
+            claim_status = f"**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
+
+        status_message = (
+            f"📊 **Aapka Referral Status**\n"
+            "-----------------------------------\n"
+            f"👥 Total Invites: **{user['total_invites']}**\n"
+            f"💰 Available Invites for Claim: **{user['available_invites']}**\n\n"
+            f"**Claim Status:** {claim_status}\n"
+            "-----------------------------------\n"
+            f"({datetime.now().strftime('%H:%M:%S')})"
+        )
         
-    referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
-    message = (
-        f"**👤 Aapka Status:**\n"
-        "--------------------------\n"
-        f"{channel_status}"
-        f"--------------------------\n"
-        f"{claim_status}\n"
-        f"--------------------------\n"
-        f"Aapka Invite Link: `{referral_link}`\n\n"
-        f"({datetime.now().strftime('%H:%M:%S')})"
-    )
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def claim_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allows user to claim the gift code based on daily invites."""
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    today_str = date.today().isoformat()
-    invites_needed = 2
-
-    # 1. Channels Verification
-    is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
-    is_ch2_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_2)
-
-    if not (is_ch1_joined and is_ch2_joined):
-        await update.message.reply_text(
-            "❌ **Na-mukammal:** Code claim karne ke liye, aapko pehle dono channels (Telegram Channel 1 aur 2) join karne honge. Phir `/claim` karein.",
+        await query.edit_message_text(
+            status_message,
+            reply_markup=await get_main_keyboard(user_id),
             parse_mode='Markdown'
         )
-        return
 
-    # 2. Daily Claim Check
-    if user["last_claimed_date"] == today_str:
-        await update.message.reply_text(
-            "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
+    elif query.data == 'claim':
+        # Claim Logic (using existing logic)
+        today_str = date.today().isoformat()
+        invites_needed = 2
+
+        if not user['channels_verified']:
+             await query.edit_message_text(
+                "❌ **Pehle Verification:** Code claim karne se pehle zaroori channels join aur verify karein.",
+                reply_markup=get_verification_keyboard(),
+                parse_mode='Markdown'
+            )
+             return
+
+        if user["last_claimed_date"] == today_str:
+            await query.edit_message_text(
+                "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
+            )
+            return
+
+        if user["available_invites"] < invites_needed:
+            remaining = invites_needed - user["available_invites"]
+            await query.edit_message_text(
+                f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
+            )
+            return
+
+        # Successful Claim
+        user["available_invites"] -= invites_needed
+        user["last_claimed_date"] = today_str
+        global GIFT_CODE
+        
+        message = (
+            "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
+            f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
+            f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
+            "--------------------------\n"
+            f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain."
         )
-        return
-
-    # 3. Invite Count Check
-    if user["available_invites"] < invites_needed:
-        remaining = invites_needed - user["available_invites"]
-        await update.message.reply_text(
-            f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
+        await query.edit_message_text(message, parse_mode='Markdown')
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
         )
-        return
+        save_data()
+        await send_main_menu(update, context) # Send back to main menu
 
-    # 4. Successful Claim
-    user["available_invites"] -= invites_needed
-    user["last_claimed_date"] = today_str
-    
-    global GIFT_CODE
-    
-    message = (
-        "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
-        f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
-        f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
-        "--------------------------\n"
-        f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain. Apni link share karte rahein!"
-    )
-    await update.message.reply_text(message, parse_mode='Markdown')
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"✅ CLAIMED: User {update.effective_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
-    )
-    save_data()
+
+# ... (error_handler and unknown remain the same) ...
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Update '%s' caused error '%s'", update, context.error)
+    if update and update.effective_user and update.effective_user.id != ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"🚨 Error in Bot: Update {update.update_id} caused error: {context.error}"
+            )
+        except:
+             pass
+
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message and update.message.text.startswith('/'):
+        await update.message.reply_text("Maaf kijiye, main is command ko nahi samajh paya. Menu ke liye /start type karein.")
+    else:
+         # Handle unrecognised messages by sending to main menu if verified
+         user = get_user(update.effective_user.id)
+         if user['channels_verified']:
+             await send_main_menu(update, context)
 
 
 async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin-only command to change the daily gift code."""
+    # ... (setcode_command remains the same) ...
     global GIFT_CODE
     
     if update.effective_user.id != ADMIN_ID:
@@ -248,46 +301,24 @@ async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"✅ **Success!** Naya Daily Gift Code set kar diya gaya hai: `{GIFT_CODE}`"
     )
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a message to admin."""
-    logger.error("Update '%s' caused error '%s'", update, context.error)
-    if update and update.effective_user and update.effective_user.id != ADMIN_ID:
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"🚨 Error in Bot: Update {update.update_id} caused error: {context.error}"
-        )
-    
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles unknown commands."""
-    await update.message.reply_text("Maaf kijiye, main is command ko nahi samajh paya. Zaroori commands ke liye `/start` type karein.")
-
-# --- Main Setup ---
-
 def main() -> None:
-    """Start the bot."""
-    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not CHANNEL_ID_2 or not WEBHOOK_URL:
-        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein.")
+    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not WEBHOOK_URL:
+        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein. WHATSAPP_LINK optional hai.")
         return
-
-    # Data load (non-persistent)
+        
     load_data()
-    
-    # Create the Application and pass it your bot's token.
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # --- Handlers ---
+    
+    # Handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("claim", claim_command))
     application.add_handler(CommandHandler("setcode", setcode_command))
-    
-    # Unknown commands (must be last)
+    application.add_handler(filters.UpdateType.CALLBACK_QUERY, handle_callback_query))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown)) # Handles general text messages
     
-    # Error handler
     application.add_error_handler(error_handler)
 
-    # --- Run with Webhook for Render ---
+    # Run with Webhook for Render
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -295,7 +326,6 @@ def main() -> None:
         webhook_url=WEBHOOK_URL,
     )
     logger.info("Bot started successfully in Webhook mode (Render compatible).")
-
 
 if __name__ == "__main__":
     main()
