@@ -2,19 +2,15 @@ import os
 import logging
 import json
 from datetime import datetime, date
-from telegram.error import BadRequest
-# Yeh hai woh line jismein Application, CallbackQueryHandler aur dusri classes hain
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-
-# --- Configuration (Environment Variables se load hongi) ---
-# ... (Baaki code yahan se shuru hota hai)
+from telegram.error import BadRequest # Telegram API errors handle karne ke liye
 
 # --- Configuration (Environment Variables se load hongi) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Telegram Channel ID/Username
-WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink") # WhatsApp Link
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Telegram Channel ID/Username (-100...)
+WHATSAPP_LINK = os.environ.get("WHATSAPP_LINK", "https://chat.whatsapp.com/defaultlink")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8080))
 GIFT_CODE = os.environ.get("GIFT_CODE", "92pak")
@@ -25,10 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Data Handling (Pichla Non-persistent Data System) ---
+# --- Data Handling (Non-persistent - For testing) ---
 user_data = {}
-# ... (load_data and save_data functions remain the same as before) ...
-# Note: For simplicity and continuity, keeping the non-persistent data functions.
 def load_data():
     global user_data, GIFT_CODE
     try:
@@ -55,44 +49,47 @@ def get_user(user_id):
             "total_invites": 0,
             "available_invites": 0,
             "last_claimed_date": "1970-01-01",
-            "channels_verified": False, # New field for initial verification status
+            "channels_verified": False,
         }
     return user_data[user_id_str]
 
-from telegram.error import BadRequest  # 👈 YEH LINE ZAROOR IMPORT KAREIN
-
-# ...
-# ... (Baaki code) ...
-# ...
-
+# --- CORE VERIFICATION FUNCTION ---
 async def check_subscription(bot: Bot, user_id: int, chat_id: str) -> bool:
-    """Checks if the user is a member of the given channel by handling exceptions properly."""
+    """Checks if the user is a member of the given channel."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-        
-        # Check if the user is a valid member status
-        return member.status in ['member', 'administrator', 'creator']
+        # Check for valid membership status
+        if member.status in ['member', 'administrator', 'creator']:
+            logger.info(f"✅ USER {user_id} IS MEMBER of {chat_id}. Status: {member.status}")
+            return True
+        else:
+            logger.info(f"❌ USER {user_id} NOT A MEMBER of {chat_id}. Status: {member.status}")
+            return False
     
     except BadRequest as e:
-        # User is not a member OR the chat ID is incorrect.
-        # Most common error for 'User is not a member of the chat' is a BadRequest
-        if 'user not found' in str(e) or 'user not participant' in str(e):
-            return False # User is definitely NOT a member
+        # Common errors when user is not found or chat ID is wrong
+        error_msg = str(e).lower()
+        if 'user not found' in error_msg or 'user not participant' in error_msg:
+            logger.warning(f"⚠️ VERIFICATION FAILED (User not participant) for {user_id} in {chat_id}")
+            return False
         
-        # If any other BadRequest error occurs (e.g., bot not admin, ID issue), log it.
-        logger.error(f"Telegram API BadRequest during verification for {user_id} in {chat_id}: {e}")
+        # If the bot is NOT ADMIN or CHAT ID IS WRONG
+        logger.error(f"🚨 CRITICAL BADREQUEST ERROR (Check ID/Admin status): {e}")
         return False
         
     except Exception as e:
-        # Catch all other unexpected errors (e.g., network, or unhandled)
-        logger.error(f"Unexpected error during verification for {user_id}: {e}")
+        logger.error(f"🚨 UNEXPECTED ERROR during verification for {user_id}: {e}")
         return False
-
-# --- Custom Keyboards ---
-
+        
+# --- Custom Keyboards (Unchanged) ---
 async def get_main_keyboard(user_id):
     """Generates the main command buttons."""
-    referral_link = f"https://t.me/@{os.environ.get('BOT_USERNAME')}?start={user_id}"
+    # Ensure BOT_USERNAME is available for referral link
+    if 'BOT_USERNAME' not in os.environ:
+        bot_info = await context.bot.get_me()
+        os.environ['BOT_USERNAME'] = bot_info.username
+        
+    referral_link = f"https://t.me/{os.environ.get('BOT_USERNAME')}?start={user_id}"
     
     keyboard = [
         [InlineKeyboardButton("🔗 Reffer Link (Doston Ko Invite Karein)", url=referral_link)],
@@ -106,26 +103,24 @@ async def get_main_keyboard(user_id):
 def get_verification_keyboard():
     """Generates the initial channel verification buttons."""
     keyboard = [
+        # Note: WhatsApp is NOT being verified by code, only Telegram
         [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=f"https://t.me/{CHANNEL_ID_1.replace('@', '')}")],
-        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)],
+        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)], 
         [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 # --- Handlers ---
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /start command, registers user, and tracks referrals."""
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
     
-    # Set bot username for referral link in the first run if not set
+    # Set bot username for referral link
     if 'BOT_USERNAME' not in os.environ:
         bot_info = await context.bot.get_me()
         os.environ['BOT_USERNAME'] = bot_info.username
-
-    # Referral Tracking Logic
+        
+    # Referral Tracking Logic (Unchanged)
     if context.args and context.args[0].isdigit():
         referrer_id = context.args[0]
         referrer_id_str = str(referrer_id)
@@ -147,7 +142,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the initial verification step with buttons."""
     text = (
         "**Asslam-o-Alaikum everyone !!**\n"
         "🥳 **WELCOME TO OUR FREE GIFT CODE BOT**\n\n"
@@ -163,7 +157,6 @@ async def send_verification_step(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the welcome message and main menu keyboard."""
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
     
@@ -182,7 +175,6 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles button clicks."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -190,28 +182,30 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     if query.data == 'verify_check':
         # Channel Verification Logic
+        logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
         is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
         
-        # NOTE: WhatsApp verification is manual/assumed. We'll proceed if TG is joined.
-        # Agar aap doosra TG channel add karen to yahan logic badal dein.
+        # NOTE: Only Telegram channel join is required for verification to proceed
         
         if is_ch1_joined:
             user['channels_verified'] = True
             save_data()
+            logger.info(f"🟢 VERIFICATION SUCCESS for user {user_id}")
             await query.edit_message_text(
-                "✅ **Verification Kamyab!** Ab aap Gift Code haasil kar sakte hain. Aagay badhein.",
+                "✅ **Verification Kamyab!** Aapne zaroori channels join kar liye hain. Aagay badhein.",
                 parse_mode='Markdown'
             )
             await send_main_menu(update, context)
         else:
+            logger.info(f"🔴 VERIFICATION FAILED for user {user_id}")
             await query.edit_message_text(
-                "❌ **Verification Nakam!** Aapne Telegram Channel join nahi kiya hai ya bot ko dobara start/verify karna hoga.",
+                "❌ **Verification Nakam!** Aapne zaroori Telegram Channel join nahi kiya hai. Pehle join karein aur phir dobara koshish karein.",
                 reply_markup=get_verification_keyboard(),
                 parse_mode='Markdown'
             )
 
+    # ... (status and claim logic remains the same) ...
     elif query.data == 'status':
-        # Status Logic (using existing logic but formatted better)
         is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1)
         
         claim_status = ""
@@ -240,7 +234,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     elif query.data == 'claim':
-        # Claim Logic (using existing logic)
         today_str = date.today().isoformat()
         invites_needed = 2
 
@@ -283,10 +276,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
         )
         save_data()
-        await send_main_menu(update, context) # Send back to main menu
+        await send_main_menu(update, context)
 
 
-# ... (error_handler and unknown remain the same) ...
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Update '%s' caused error '%s'", update, context.error)
     if update and update.effective_user and update.effective_user.id != ADMIN_ID:
@@ -302,14 +294,12 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message and update.message.text.startswith('/'):
         await update.message.reply_text("Maaf kijiye, main is command ko nahi samajh paya. Menu ke liye /start type karein.")
     else:
-         # Handle unrecognised messages by sending to main menu if verified
-         user = get_user(update.effective_user.id)
-         if user['channels_verified']:
+        user = get_user(update.effective_user.id)
+        if user['channels_verified']:
              await send_main_menu(update, context)
 
 
 async def setcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (setcode_command remains the same) ...
     global GIFT_CODE
     
     if update.effective_user.id != ADMIN_ID:
@@ -339,9 +329,9 @@ def main() -> None:
     # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setcode", setcode_command))
-   
+    application.add_handler(CallbackQueryHandler(handle_callback_query)) # Button clicks
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown)) # Handles general text messages
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
     
     application.add_error_handler(error_handler)
 
