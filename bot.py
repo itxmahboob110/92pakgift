@@ -161,16 +161,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     user = user_data[user_id]
     
-    elif query.data == 'verify_check':
+    # 🚨 FIX 1: If/elif structure theek ki gayi hai.
+    # Verification check hamesha 'if' se shuru hona chahiye.
+    if query.data == 'verify_check':
+        # Final Verification Logic with Safety Override
         logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
-        
-        # 1. Verification Attempt (API Call)
-        # CHANNEL_ID_1 (Numerical ID) for verification
         is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1) 
         
-        # 2. Safety Override Logic: Proceed to main menu even if the check fails
-        
-        user['channels_verified'] = True # <-- Ab user hamesha verified mark hoga
+        # Safety Override: Verification hamesha grant ho jayegi for testing
+        user['channels_verified'] = True 
         
         if is_ch1_joined:
             # Agar API call kamyab ho to yeh message milega
@@ -181,16 +180,89 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             logger.info(f"🔴 VERIFICATION FAILED by API for user {user_id} but granting access for testing.")
             message_text = "⚠️ **Verification Nakam!** (Lekin aap aagay badh sakte hain) Zaroor check karein ke aapne channel join kiya hai. Aagay badhein."
 
-        # 3. Final Step: Edit message and go to the main menu regardless of the result.
         await query.edit_message_text(
             message_text,
             parse_mode='Markdown'
         )
         
-        # Thoda sa delay dete hain taake message update ho sake
+        # Taake message update ho sake
         import asyncio
-        await asyncio.sleep(1) # 1 second ka intezar
+        await asyncio.sleep(1) 
         
+        await send_main_menu(update, context)
+
+    # Status check (Ab yeh 'elif' theek hai)
+    elif query.data == 'status':
+        # Status Logic 
+        claim_status = ""
+        invites_needed = 2
+        
+        if user["available_invites"] >= invites_needed:
+             claim_status = "**Mubarak!** Aap code claim karne ke liye tayyar hain. '🎁 Claim Gift Code' button dabayein."
+        else:
+            remaining = invites_needed - user["available_invites"]
+            claim_status = f"**Agla Code:** Aapko mazeed **{remaining}** invites ki zaroorat hai."
+
+        status_message = (
+            f"📊 **Aapka Referral Status**\n"
+            "-----------------------------------\n"
+            f"👥 Total Invites: **{user['total_invites']}**\n"
+            f"💰 Available Invites for Claim: **{user['available_invites']}**\n\n"
+            f"**Claim Status:** {claim_status}\n"
+            "-----------------------------------\n"
+            f"({datetime.now().strftime('%H:%M:%S')})"
+        )
+        
+        await query.edit_message_text(
+            status_message,
+            reply_markup=await get_main_keyboard(context, user_id), 
+            parse_mode='Markdown'
+        )
+
+    # Claim check (Ab yeh 'elif' bhi theek hai)
+    elif query.data == 'claim':
+        # Claim Logic 
+        today_str = date.today().isoformat()
+        invites_needed = 2
+
+        if not user['channels_verified']:
+             await query.edit_message_text(
+                "❌ **Pehle Verification:** Code claim karne se pehle zaroori channels join aur verify karein.",
+                reply_markup=get_verification_keyboard(),
+                parse_mode='Markdown'
+            )
+             return
+
+        if user["last_claimed_date"] == today_str:
+            await query.edit_message_text(
+                "⏳ **Ruk Jayiye:** Aap aaj ka code pehle hi claim kar chuke hain. Aap rozana sirf aik code claim kar sakte hain."
+            )
+            return
+
+        if user["available_invites"] < invites_needed:
+            remaining = invites_needed - user["available_invites"]
+            await query.edit_message_text(
+                f"❌ **Na-mukammal:** Aapke paas abhi sirf {user['available_invites']} available invites hain. Mazeed **{remaining}** doston ko invite karein."
+            )
+            return
+
+        # Successful Claim
+        user["available_invites"] -= invites_needed
+        user["last_claimed_date"] = today_str
+        global GIFT_CODE
+        
+        message = (
+            "🎉 **Mubarak ho! Aapka Gift Code!** 🎉\n\n"
+            f"Aapne kamyabi se **{invites_needed}** invites istemaal kar ke code claim kar liya hai.\n\n"
+            f"🎮 **Aapka Gift Code (Daily Code):** `{GIFT_CODE}`\n\n"
+            "--------------------------\n"
+            f"🎁 **Agla Code:** Agla code aap kal ({user['available_invites']} invites baqi hain) ya jab bhi aapke paas **2 naye invites** jama hon, tab claim kar sakte hain."
+        )
+        await query.edit_message_text(message, parse_mode='Markdown')
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"✅ CLAIMED: User {query.from_user.full_name} ({user_id}) ne aaj ka code claim kar liya. Remaining invites: {user['available_invites']}"
+        )
         await send_main_menu(update, context)
         else:
             logger.info(f"🔴 VERIFICATION FAILED for user {user_id}")
