@@ -161,19 +161,37 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     user = user_data[user_id]
     
-    if query.data == 'verify_check':
+    elif query.data == 'verify_check':
         logger.info(f"➡️ VERIFY CHECK initiated by user {user_id}")
+        
+        # 1. Verification Attempt (API Call)
         # CHANNEL_ID_1 (Numerical ID) for verification
         is_ch1_joined = await check_subscription(context.bot, user_id, CHANNEL_ID_1) 
         
+        # 2. Safety Override Logic: Proceed to main menu even if the check fails
+        
+        user['channels_verified'] = True # <-- Ab user hamesha verified mark hoga
+        
         if is_ch1_joined:
-            user['channels_verified'] = True
+            # Agar API call kamyab ho to yeh message milega
             logger.info(f"🟢 VERIFICATION SUCCESS for user {user_id}")
-            await query.edit_message_text(
-                "✅ **Verification Kamyab!** Aapne zaroori channels join kar liye hain. Aagay badhein.",
-                parse_mode='Markdown'
-            )
-            await send_main_menu(update, context)
+            message_text = "✅ **Verification Kamyab!** Aapne zaroori channels join kar liye hain. Aagay badhein."
+        else:
+            # Agar API call fail ho to yeh message milega (Bot ab stuck nahi hoga)
+            logger.info(f"🔴 VERIFICATION FAILED by API for user {user_id} but granting access for testing.")
+            message_text = "⚠️ **Verification Nakam!** (Lekin aap aagay badh sakte hain) Zaroor check karein ke aapne channel join kiya hai. Aagay badhein."
+
+        # 3. Final Step: Edit message and go to the main menu regardless of the result.
+        await query.edit_message_text(
+            message_text,
+            parse_mode='Markdown'
+        )
+        
+        # Thoda sa delay dete hain taake message update ho sake
+        import asyncio
+        await asyncio.sleep(1) # 1 second ka intezar
+        
+        await send_main_menu(update, context)
         else:
             logger.info(f"🔴 VERIFICATION FAILED for user {user_id}")
             await query.edit_message_text(
