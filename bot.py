@@ -115,13 +115,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     user_data_entry = get_user(user_id)
     
-    # Set bot username for referral link
-    if 'BOT_USERNAME' not in os.environ:
-        bot_info = await context.bot.get_me()
-        os.environ['BOT_USERNAME'] = bot_info.username
-        
-    # Referral Tracking Logic (Unchanged)
-    if context.args and context.args[0].isdigit():
+   # Change 1: Configuration block mein naya variable CHANNEL_USERNAME add karein:
+CHANNEL_ID_1 = os.environ.get("CHANNEL_ID_1") # Numerical ID (-100...) for VERIFICATION
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME") # Username (@color_trader_expert) for LINKING
+
+# Change 2: get_verification_keyboard function ko is tarah badlein:
+def get_verification_keyboard():
+    """Generates the initial channel verification buttons."""
+    # Channel link banane ke liye CHANNEL_USERNAME ka istemaal
+    telegram_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}" 
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Telegram Channel Join Karein", url=telegram_link)],
+        [InlineKeyboardButton("🌐 WhatsApp Channel Join Karein", url=WHATSAPP_LINK)],
+        [InlineKeyboardButton("☑️ Verification Confirm Karein", callback_data='verify_check')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# Change 3: main() function mein zaroori variables ki check list ko badlein:
+def main() -> None:
+    if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID_1 or not CHANNEL_USERNAME or not WEBHOOK_URL:
+        logger.error("❌ Zaroori Environment Variables set nahi hain. Kripya .env file ya Render settings check karein. WHATSAPP_LINK optional hai.")
+        return
+# ... (Baaki code jaisa hai waisa hi rahega)
         referrer_id = context.args[0]
         referrer_id_str = str(referrer_id)
         if referrer_id_str != str(user_id) and user_data_entry.get("referrer_tracked") is None:
