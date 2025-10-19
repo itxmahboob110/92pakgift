@@ -53,10 +53,15 @@ application.add_handler(CallbackQueryHandler(verify, pattern="verify"))
 
 # --- Flask Webhook Route ---
 @app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "OK", 200
+async def webhook():
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+    return "ok", 200
+
 
 @app.route("/")
 def home():
